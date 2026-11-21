@@ -29,6 +29,7 @@ def menu():
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(cfg.BTN_CATALOG, url=cfg.SHOP_URL)],
+            [InlineKeyboardButton(cfg.BTN_PDF, callback_data="pdf")],
             [InlineKeyboardButton(cfg.BTN_CHOOSE, callback_data="choose")],
             [InlineKeyboardButton(cfg.BTN_CODE, callback_data="code")],
             [InlineKeyboardButton(cfg.BTN_CONTACT, url=cfg.CONTACT_URL)],
@@ -93,9 +94,62 @@ async def show_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_choose(q.message)
 
 
+def _catalog_path():
+    return _seen_path().with_name("catalog.json")
+
+
+def get_catalog_id():
+    """file_id PDF-каталога: сначала из переменной CATALOG_FILE_ID, потом из сохранённого файла."""
+    fid = os.environ.get("CATALOG_FILE_ID")
+    if fid:
+        return fid
+    try:
+        return json.loads(_catalog_path().read_text(encoding="utf-8")).get("file_id")
+    except Exception:
+        return None
+
+
+async def send_catalog(message):
+    fid = get_catalog_id()
+    if not fid:
+        await message.reply_text(cfg.PDF_MISSING, reply_markup=menu())
+        return
+    try:
+        await message.reply_document(fid, caption=cfg.PDF_CAPTION)
+        await message.reply_text("Что дальше?", reply_markup=menu())
+    except Exception:
+        log.exception("Не удалось отправить каталог")
+        await message.reply_text(cfg.PDF_MISSING, reply_markup=menu())
+
+
+async def show_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await send_catalog(q.message)
+
+
+async def owner_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Владелец присылает боту PDF: бот запоминает его как каталог и показывает file_id."""
+    user = update.effective_user
+    if not user or str(user.id) != os.environ.get("OWNER_ID", ""):
+        return
+    doc = update.effective_message.document
+    try:
+        _catalog_path().write_text(json.dumps({"file_id": doc.file_id}), encoding="utf-8")
+    except Exception:
+        log.exception("Не удалось сохранить file_id каталога")
+    await update.effective_message.reply_text(
+        "Каталог сохранён. Теперь кнопка «PDF» будет присылать этот файл.\n\n"
+        "На случай обновления бота можно добавить переменную CATALOG_FILE_ID со значением:\n"
+        f"{doc.file_id}"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0] == "choose":
         await send_choose(update.effective_message)  # пришли из канала по кнопке «Перейти к выбору»
+    elif context.args and context.args[0] == "pdf":
+        await send_catalog(update.effective_message)  # пришли из канала по кнопке PDF
     else:
         await update.effective_message.reply_text(cfg.WELCOME, reply_markup=menu())
     user = update.effective_user
@@ -117,6 +171,7 @@ def channel_menu():
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(cfg.BTN_CATALOG, url=cfg.SHOP_URL)],
+            [InlineKeyboardButton(cfg.BTN_PDF, url=cfg.BOT_URL + "?start=pdf")],
             [InlineKeyboardButton(cfg.BTN_CHOOSE, url=cfg.BOT_URL + "?start=choose")],
             [InlineKeyboardButton(cfg.BTN_OPEN_BOT, url=cfg.BOT_URL)],
             [InlineKeyboardButton(cfg.BTN_CONTACT, url=cfg.CONTACT_URL)],
@@ -157,6 +212,8 @@ def main():
     app.add_handler(CommandHandler("channel_post", channel_post))
     app.add_handler(CallbackQueryHandler(show_code, pattern=r"^code$"))
     app.add_handler(CallbackQueryHandler(show_choose, pattern=r"^choose$"))
+    app.add_handler(CallbackQueryHandler(show_pdf, pattern=r"^pdf$"))
+    app.add_handler(MessageHandler(filters.Document.PDF, owner_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_text))
     log.info("Бот запущен")
     app.run_polling()
