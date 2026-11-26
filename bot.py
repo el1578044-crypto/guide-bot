@@ -198,6 +198,89 @@ async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"Не получилось опубликовать пост: {e}")
 
 
+def post_menu():
+    """Кнопки под каждым постом в канале."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(cfg.BTN_CATALOG, url=cfg.SHOP_URL)],
+            [InlineKeyboardButton(cfg.BTN_PDF, url=cfg.BOT_URL + "?start=pdf")],
+            [InlineKeyboardButton(cfg.BTN_CHOOSE, url=cfg.BOT_URL + "?start=choose")],
+            [InlineKeyboardButton(cfg.BTN_CONTACT, url=cfg.CONTACT_URL)],
+        ]
+    )
+
+
+def is_owner(update: Update):
+    user = update.effective_user
+    return bool(user) and str(user.id) == os.environ.get("OWNER_ID", "")
+
+
+async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/post: следующее сообщение владельца пойдёт в канал с кнопками."""
+    if not is_owner(update):
+        return
+    context.user_data["awaiting_post"] = True
+    await update.effective_message.reply_text(
+        "Пришлите мне пост одним сообщением: текст, или фото, или видео с подписью.\n"
+        "Я покажу, как он будет выглядеть, и спрошу, публиковать ли.\n\n"
+        "Отмена: /cancel"
+    )
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    context.user_data.pop("awaiting_post", None)
+    await update.effective_message.reply_text("Хорошо, отменила.")
+
+
+async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if is_owner(update):
+        if context.user_data.pop("awaiting_post", False):
+            # показываем предпросмотр с кнопками и просим подтвердить
+            await context.bot.copy_message(
+                chat_id=msg.chat_id, from_chat_id=msg.chat_id, message_id=msg.message_id,
+                reply_markup=post_menu(),
+            )
+            await msg.reply_text(
+                "Опубликовать это в канале?",
+                reply_markup=InlineKeyboardMarkup(
+                    [[
+                        InlineKeyboardButton("✅ Опубликовать", callback_data=f"pub:{msg.message_id}"),
+                        InlineKeyboardButton("✖️ Отмена", callback_data="nopub"),
+                    ]]
+                ),
+            )
+            return
+        if msg.document and (msg.document.mime_type == "application/pdf"):
+            await owner_document(update, context)
+            return
+    if msg.text:
+        await msg.reply_text(cfg.FALLBACK, reply_markup=menu())
+
+
+async def publish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_owner(update):
+        return
+    channel_id = os.environ.get("CHANNEL_ID")
+    if q.data == "nopub":
+        await q.message.edit_text("Хорошо, не публикую.")
+        return
+    try:
+        msg_id = int(q.data.split(":", 1)[1])
+        await context.bot.copy_message(
+            chat_id=int(channel_id), from_chat_id=q.message.chat_id, message_id=msg_id,
+            reply_markup=post_menu(),
+        )
+        await q.message.edit_text("Готово, пост опубликован в канале. ✅")
+    except Exception as e:
+        log.exception("Не удалось опубликовать пост")
+        await q.message.edit_text(f"Не получилось опубликовать: {e}")
+
+
 async def any_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(cfg.FALLBACK, reply_markup=menu())
 
@@ -213,8 +296,10 @@ def main():
     app.add_handler(CallbackQueryHandler(show_code, pattern=r"^code$"))
     app.add_handler(CallbackQueryHandler(show_choose, pattern=r"^choose$"))
     app.add_handler(CallbackQueryHandler(show_pdf, pattern=r"^pdf$"))
-    app.add_handler(MessageHandler(filters.Document.PDF, owner_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_text))
+    app.add_handler(CommandHandler("post", post_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CallbackQueryHandler(publish_cb, pattern=r"^(pub:\d+|nopub)$"))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message))
     log.info("Бот запущен")
     app.run_polling()
 
